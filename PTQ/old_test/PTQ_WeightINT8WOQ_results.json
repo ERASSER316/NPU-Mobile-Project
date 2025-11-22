@@ -1,0 +1,23 @@
+{
+  "model_path": "../../models/Llama-3.2-1B-Instruct",
+  "quant_mode": "int8_woq",
+  "data_dir": "../datasets/mergedata_preprocessed",
+  "model_size_mb_via_save": 1719.3172807693481,
+  "evaluation_date": "2025-11-09 14:03:35",
+  "test": {
+    "ppl": 25.72124473093635,
+    "avg_loss": 3.247317293646933,
+    "loss_std": 0.20632493495941162,
+    "loss_min": 2.339998245239258,
+    "loss_max": 3.8808252811431885,
+    "total_tokens": 1912813,
+    "samples_evaluated": 7757
+  },
+  "throughput": {
+    "mean_latency_ms": 555.1862890625,
+    "tokens_per_sec": 14755.407619725614,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  }
+}
