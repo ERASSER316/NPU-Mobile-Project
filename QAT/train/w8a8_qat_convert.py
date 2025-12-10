@@ -5,8 +5,8 @@ from torchao.quantization import Int8DynamicActivationInt8WeightConfig, quantize
 import os
 
 # 1. QAT 后的模型作为量化起点（不是原始BF16）
-qat_model_path = "../model_quantization/llama3.2-1b-w8a8-qat-fake"  # 换成你实际QAT保存路径
-save_dir = "../model_quantization/llama3.2-1b-w8a8-qat-int8"        # 新目录，避免覆盖
+qat_model_path = "../../modelnew/llama3.2-1b-w8a8-qat-experiment"  # 换成你实际QAT保存路径
+save_dir = "../../modelnew_quantization/llama3.2-1b-w8a8-qat-int8"        # 新目录，避免覆盖
 device = "cuda"
 
 os.makedirs(save_dir, exist_ok=True)

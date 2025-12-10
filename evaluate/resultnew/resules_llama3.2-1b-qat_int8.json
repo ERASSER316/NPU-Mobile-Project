@@ -1,0 +1,30 @@
+{
+  "model_path": "../modelnew_quantization/llama3.2-1b-w8a8-qat-int8",
+  "quant_mode": "qat_w8a8",
+  "data_dir": "../datasets/mergedata_prev2",
+  "model_size_mb_via_save": 1430.0148210525513,
+  "evaluation_date": "2025-12-10 09:06:51",
+  "test": {
+    "ppl": 1.898672882558567,
+    "avg_loss": 0.641155159255676,
+    "loss_std": 0.16977567970752716,
+    "loss_min": 0.0893721878528595,
+    "loss_max": 1.2244361639022827,
+    "total_tokens": 233622,
+    "samples_evaluated": 7757
+  },
+  "throughput": {
+    "mean_latency_ms": 573.296537399292,
+    "tokens_per_sec": 14289.289164665583,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  },
+  "throughput_compiled": {
+    "mean_latency_ms": 201.28973007202148,
+    "tokens_per_sec": 40697.55569282597,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  }
+}

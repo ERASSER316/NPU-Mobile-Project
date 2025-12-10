@@ -4,40 +4,55 @@
 """
 Baseline FP/BF16 Finetune Script for Llama-3.2-1B (Train Only)
 
-作用：
-- 在原始 Llama-3.2-1B 上做纯 FP/BF16 的短轮次训练（例如 100 steps）
-- 不做任何在线评测（不算 PPL、不测 throughput）
-- 训练结束后，只负责：
-    * 保存 finetune 后的 BF16 模型
-    * 保存 tokenizer
-    * 记录一些训练元信息（steps、模型大小等），供 offline eval 脚本使用
+修改说明：
+- 增加了随机种子固定 (set_seed)，确保与 QAT 实验的数据顺序一致。
+- 增加了 LR Scheduler (Cosine/Linear)，避免固定 LR 导致的收敛差异。
+- 增加了梯度累积 (Gradient Accumulation) 支持，以便对齐 batch size。
+- 优化了训练循环和日志记录。
 
-CUDA_VISIBLE_DEVICES=2 python baseline_finetune_train.py \
+使用方法：
+    CUDA_VISIBLE_DEVICES=2 python baseline_finetune_train.py \
     --model_path ../../../models/Llama-3.2-1B-Instruct \
-    --data_dir ../../datasets/mergedata_preprocessed \
-    --save_dir ../../model_quantization/llama3.2-1b-fp-finetune-100steps \
+    --data_dir ../../datasets/mergedata_prev2  \
+    --save_dir ../../modelnew/llama3.2-1b-baseline-control \
     --train_batch_size 1 \
+    --gradient_accumulation_steps 16 \
     --max_steps 100 \
-    --lr 5e-5 \
+    --lr 2e-5 \
+    --seed 42 \
     --device cuda
-
-后续：
-- 使用统一的 offline eval 脚本，对该 finetuned 模型做 PPL / throughput 评测
-- 再在此 finetuned BF16 模型上做 W8A8 PTQ，导出 INT8 模型
 """
 
 import os
 import time
 import json
-from pathlib import Path
+import random
+import logging
 import argparse
+from pathlib import Path
 
 import torch
+import numpy as np
 from torch.utils.data import DataLoader
 from datasets import load_from_disk
+from tqdm import tqdm
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM, 
+    AutoTokenizer, 
+    get_scheduler,
+    set_seed
+)
 
+# ======================
+# Setup Logging
+# ======================
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 # ======================
 # Utils
@@ -45,58 +60,55 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def parse_args():
     parser = argparse.ArgumentParser("Baseline FP/BF16 Finetune (Train Only)")
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="Base Llama-3.2-1B model path")
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Tokenized dataset path (load_from_disk)")
-    parser.add_argument("--save_dir", type=str, required=True,
-                        help="Where to save finetuned baseline model")
+    parser.add_argument("--model_path", type=str, required=True, help="Base model path")
+    parser.add_argument("--data_dir", type=str, required=True, help="Tokenized dataset path")
+    parser.add_argument("--save_dir", type=str, required=True, help="Output directory")
 
     parser.add_argument("--train_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, 
+                        help="Number of updates steps to accumulate before backward()")
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--lr", type=float, default=5e-5)
-
-    parser.add_argument("--max_samples", type=int, default=None,
-                        help="If set, subsample train split for quick debug")
-
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--warmup_ratio", type=float, default=0.03, help="Warmup ratio for scheduler")
+    
+    parser.add_argument("--max_samples", type=int, default=None, help="Debug: subsample dataset")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--meta_file", type=str,
-                        default="baseline_fp_finetune_meta.json",
-                        help="Meta info JSON saved into save_dir")
+    parser.add_argument("--meta_file", type=str, default="baseline_fp_finetune_meta.json")
 
     return parser.parse_args()
 
 
 def collate_fn(examples):
     """
-    与 QAT 脚本保持一致：
-    - 假设 dataset 中每个样本含有 "input_ids", "attention_mask"
-    - labels = input_ids.clone()
-      （注意：offline eval 脚本有自己的 labels 处理逻辑，这里只用于训练）
+    与 QAT 脚本保持严格一致的数据处理
+    使用数据自带的labels（保留预处理中的-100标记，用于mask padding tokens）
     """
     input_ids = [torch.tensor(e["input_ids"], dtype=torch.long) for e in examples]
     attention_mask = [torch.tensor(e["attention_mask"], dtype=torch.long) for e in examples]
+    labels = [torch.tensor(e["labels"], dtype=torch.long) for e in examples]  # 使用数据自带的labels
 
     input_ids = torch.stack(input_ids, dim=0)
     attention_mask = torch.stack(attention_mask, dim=0)
+    labels = torch.stack(labels, dim=0)
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
-        "labels": input_ids.clone(),
+        "labels": labels,  # 保留-100标记，避免对padding tokens计算loss
     }
 
 
 def get_model_size_mb_via_save(model, save_dir):
     """
-    与 QAT 脚本相同的“通过临时保存 state_dict 测模型体积”的方法。
-    不属于精度评测，只是记录一个模型大小的 meta 信息。
+    通过临时保存测体积，确保统计口径一致
     """
     os.makedirs(save_dir, exist_ok=True)
     tmp_path = os.path.join(save_dir, "tmp_baseline_fp_model.pt")
     torch.save(model.state_dict(), tmp_path)
     size_mb = os.path.getsize(tmp_path) / (1024 * 1024)
-    os.remove(tmp_path)
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
     return size_mb
 
 
@@ -106,161 +118,160 @@ def get_model_size_mb_via_save(model, save_dir):
 
 def main():
     args = parse_args()
+    
+    # 0. Set Seed (Crucial for Baseline vs QAT comparison)
+    set_seed(args.seed)
+    
+    logger.info("=" * 60)
+    logger.info("Baseline FP/BF16 Finetune - Train Only")
+    logger.info(f"Model: {args.model_path}")
+    logger.info(f"Steps: {args.max_steps}, Batch: {args.train_batch_size}, GradAccum: {args.gradient_accumulation_steps}")
+    logger.info(f"Device: {args.device}, Seed: {args.seed}")
+    logger.info("=" * 60)
 
-    print("=" * 60)
-    print("Baseline FP/BF16 Finetune - Train Only")
-    print("=" * 60)
-    print(f"Base model path   : {args.model_path}")
-    print(f"Data dir          : {args.data_dir}")
-    print(f"Save dir          : {args.save_dir}")
-    print(f"Train batch size  : {args.train_batch_size}")
-    print(f"Max train steps   : {args.max_steps}")
-    print(f"LR                : {args.lr}")
-    print("=" * 60)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # device
-    if args.device == "cuda" and not torch.cuda.is_available():
-        print("CUDA not available, fallback to CPU.")
-        device = torch.device("cpu")
-    else:
-        device = torch.device(args.device)
-    print(f"\nUsing device: {device}")
-
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
-    # 1. Data（只用 train split 做 finetune）
-    print("\n[Step 1] Loading dataset...")
+    # 1. Data
+    logger.info("Loading dataset...")
     dataset = load_from_disk(args.data_dir)
-    if isinstance(dataset, dict):
-        train_data = dataset.get("train", None)
-    else:
-        train_data = dataset
-
-    if train_data is None:
-        raise ValueError("Train split is required.")
-
-    print(f"  ✓ Train samples: {len(train_data)}")
-
+    train_data = dataset.get("train", dataset) if isinstance(dataset, dict) else dataset
+    
     if args.max_samples is not None:
         train_data = train_data.select(range(min(args.max_samples, len(train_data))))
-        print(f"  ✓ Subsampled to {len(train_data)} train samples")
+    
+    logger.info(f"Train samples: {len(train_data)}")
 
     train_loader = DataLoader(
         train_data,
         batch_size=args.train_batch_size,
-        shuffle=True,
+        shuffle=True, # Seed ensures this shuffle is identical to QAT run if seed matches
         collate_fn=collate_fn,
+        drop_last=True # Prevent shape mismatch in last batch
     )
 
     # 2. Tokenizer
-    print("\n[Step 2] Loading tokenizer...")
+    logger.info("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-        print("  ✓ Set pad_token_id = eos_token_id")
 
-    # 3. Load base model on CPU (BF16)
-    print("\n[Step 3] Loading base model on CPU (FP/BF16)...")
+    # 3. Model
+    logger.info("Loading base model (FP/BF16)...")
+    # 直接加载到目标设备通常更快，除非显存非常吃紧
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
-        device_map={"": "cpu"},
         low_cpu_mem_usage=True,
     )
+    
+    # 显存优化配置
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
-
-    # 4. Baseline FP/BF16 training（无 fake quant）
-    print("\n[Step 4] Baseline FP/BF16 finetune (no fake quant, no QAT)...")
     model.to(device)
     model.train()
 
+    # 4. Optimizer & Scheduler
+    # 确保 Optimizer 与 QAT 设置一致 (通常 QAT 也是 AdamW)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    global_step = 0
+    # Scheduler 是 Baseline 能否打过 QAT 的关键，建议使用 Cosine
+    lr_scheduler = get_scheduler(
+        name="cosine",
+        optimizer=optimizer,
+        num_warmup_steps=int(args.max_steps * args.warmup_ratio),
+        num_training_steps=args.max_steps,
+    )
+
+    # 5. Training Loop
+    logger.info("Starting training...")
+    global_step = 0      # 参数更新次数（真正的训练步数）
+    batch_iterator = 0   # batch计数（用于梯度累积）
+    total_loss = 0.0
     ema_loss = None
+    
+    progress_bar = tqdm(range(args.max_steps), desc="Training")
 
-    for epoch in range(10**9):
-        for batch in train_loader:
-            global_step += 1
-            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+    # 转换为无限迭代器，通过 max_steps 控制退出
+    train_iterator = iter(train_loader)
 
-            optimizer.zero_grad(set_to_none=True)
+    while global_step < args.max_steps: 
+        try:
+            batch = next(train_iterator)
+        except StopIteration:
+            train_iterator = iter(train_loader)
+            batch = next(train_iterator)
+        
+        batch_iterator += 1
+        batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
 
-            with torch.amp.autocast(
-                device_type=device.type,
-                dtype=torch.bfloat16 if device.type == "cuda" else torch.float32
-            ):
-                outputs = model(**batch)
-                loss = outputs.loss
+        # Forward
+        with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
+            outputs = model(**batch)
+            loss = outputs.loss / args.gradient_accumulation_steps
 
-            loss.backward()
+        # Backward
+        loss.backward()
+
+        total_loss += loss.item() * args.gradient_accumulation_steps
+
+        # Step (Gradient Accumulation Logic)
+        # 累积满N个batch才更新一次参数
+        if batch_iterator % args.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-
-            ema_loss = loss.item() if ema_loss is None else 0.9 * ema_loss + 0.1 * loss.item()
-
-            if global_step % 10 == 0:
-                print(f"[step {global_step}] loss={loss.item():.4f}, ema_loss={ema_loss:.4f}")
-
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            
+            global_step += 1  # 真正的参数更新次数
+            
+            # Update logs
+            current_loss = total_loss
+            ema_loss = current_loss if ema_loss is None else 0.9 * ema_loss + 0.1 * current_loss
+            
+            progress_bar.update(1) # 更新进度条
+            progress_bar.set_postfix({"loss": f"{ema_loss:.4f}", "lr": f"{lr_scheduler.get_last_lr()[0]:.2e}"})
+            
+            total_loss = 0.0
+            
             if global_step >= args.max_steps:
                 break
-        if global_step >= args.max_steps:
-            break
 
-    print(f"\n  ✓ Baseline finetune finished. total_steps={global_step}")
+    progress_bar.close()
+    logger.info("Training finished.")
 
-    # 5. 保存 finetuned baseline 模型（FP/BF16）
-    print("\n[Step 5] Saving finetuned baseline model (FP/BF16) to disk...")
+    # 6. Save
+    logger.info("Saving model & tokenizer...")
+    # 先移回 CPU 节省显存，防止 OOM
     model = model.to("cpu").eval()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     os.makedirs(args.save_dir, exist_ok=True)
-    model.save_pretrained(args.save_dir, safe_serialization=False)
+    model.save_pretrained(args.save_dir, safe_serialization=False) # 使用 .bin 格式，与你原脚本一致
     tokenizer.save_pretrained(args.save_dir)
 
     model_size_mb = get_model_size_mb_via_save(model, args.save_dir)
-    print(f"  ✓ Finetuned baseline model size (FP/BF16) : {model_size_mb:.1f} MB")
+    logger.info(f"Model Size: {model_size_mb:.2f} MB")
 
-    # 6. 保存 meta 信息（不含任何 PPL / throughput 指标）
-    print("\n[Step 6] Saving baseline finetune meta info...")
+    # 7. Meta Info
     meta = {
         "model_path": args.model_path,
         "data_dir": args.data_dir,
         "save_dir": args.save_dir,
         "train_batch_size": args.train_batch_size,
+        "grad_accum": args.gradient_accumulation_steps,
         "max_steps": args.max_steps,
-        "actual_train_steps": global_step,
         "lr": args.lr,
-        "device": str(device),
-        "model_size_mb_via_save": model_size_mb,
-        "evaluation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "note": (
-            "This is a pure FP/BF16 finetuned baseline (no fake quant, no QAT). "
-            "Use this model as a control group to compare with W8A8 QAT-finetune, "
-            "and as an initialization for subsequent PTQ W8A8. "
-            "All PPL / throughput evaluation should be done via the unified offline eval script."
-        ),
+        "seed": args.seed,
+        "model_size_mb": model_size_mb,
+        "note": "Baseline (FP16/BF16) with Seed & Scheduler."
     }
 
     meta_path = Path(args.save_dir) / args.meta_file
     with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"  ✓ Baseline finetune meta saved to {meta_path}")
-
-    # Summary
-    print("\n" + "=" * 60)
-    print("Baseline FP/BF16 Finetune Summary (Train Only)")
-    print("=" * 60)
-    print(f"Base model path       : {args.model_path}")
-    print(f"Finetuned model path  : {args.save_dir}")
-    print(f"Train steps           : {global_step}")
-    print(f"Finetuned size (MB)   : {model_size_mb:.1f}")
-    print("=" * 60)
-    print("Done. Use offline eval script for PPL & throughput.")
-    print("=" * 60)
+        json.dump(meta, f, indent=2)
+    
+    logger.info(f"Meta saved to {meta_path}")
 
 
 if __name__ == "__main__":

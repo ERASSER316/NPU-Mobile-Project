@@ -10,56 +10,38 @@ Offline Eval for Baseline & Offline-Quantized Models (e.g., Int8-WOQ)
     * Throughput: 固定 (batch_size, seq_len) 的前向，tokens/sec
     * Model Size: torch.save(model) 文件大小 (MB)
 
-# 1) Baseline BF16
-CUDA_VISIBLE_DEVICES=1 python eval_offline.py \
-  --model_path ../../models/Llama-3.2-1B-Instruct \
-  --data_dir ../datasets/mergedata_preprocessed \
-  --output_file ./result/baseline_offline_results.json \
+CUDA_VISIBLE_DEVICES=2 python eval_offline.py \
+  --model_path ../modelnew_quantization/llama3.2-1b-fp-finetune-100steps-w8a8-int8 \
+  --data_dir ../datasets/mergedata_prev2 \
+  --output_file ./resultnew/resules_llama3.2-1b-baseline_int8.json \
+  --batch_size 8 \
+  --device cuda \
+  --quant_mode ptq_w8a8
+
+CUDA_VISIBLE_DEVICES=2 python eval_offline.py \
+  --model_path ../modelnew_quantization/llama3.2-1b-w8a8-qat-int8 \
+  --data_dir ../datasets/mergedata_prev2  \
+  --output_file ./resultnew/resules_llama3.2-1b-qat_int8.json \
+  --batch_size 8 \
+  --device cuda \
+  --quant_mode qat_w8a8
+
+CUDA_VISIBLE_DEVICES=2 python eval_offline.py \
+  --model_path ../modelnew/llama3.2-1b-baseline-control \
+  --data_dir ../datasets/mergedata_prev2  \
+  --output_file ./resultnew/resules_llama3.2-1b-baseline-fp.json \
   --batch_size 8 \
   --device cuda \
   --quant_mode none
 
-#### 2) Offline PTQ Int8-WOQ
-CUDA_VISIBLE_DEVICES=1 python eval_offline.py \
-  --model_path ../model_quantization/llama-3.2-1b-int8woq-ptq \
-  --data_dir ../datasets/mergedata_preprocessed \
-  --output_file PTQ_offline_int8woq_results.json \
-  --batch_size 8 \
-  --device cuda \
-  --quant_mode offline_int8woq
-# 3)Offline QAT INT8_w8a8
-CUDA_VISIBLE_DEVICES=1 python eval_offline.py \
-  --model_path ../model_quantization/llama3.2-1b-w8a8-qat-int8 \
-  --data_dir ../datasets/mergedata_preprocessed \
-  --output_file w8a8_qat_int8_results.json \
-  --batch_size 8 \
-  --device cuda \
-  --quant_mode offline_w8a8_qat
-
-# 4)Offline Baseline_train_100epochs
-CUDA_VISIBLE_DEVICES=1 python eval_offline.py \
-  --model_path ../model_quantization/llama3.2-1b-fp-finetune-100steps-w8a8-int8 \
-  --data_dir ../datasets/mergedata_preprocessed \
-  --output_file resules_fp-finetune-100steps-w8a8-int8.json \
-  --batch_size 8 \
-  --device cuda \
-  --quant_mode offline_w8a8_baseline_100epochs
-
-CUDA_VISIBLE_DEVICES=1 python eval_offline.py \
-  --model_path ../model_quantization/llama3.2-1b-fp-finetune-100steps \
-  --data_dir ../datasets/mergedata_preprocessed \
-  --output_file resules_llama3.2-1b-fp-finetune-100steps.json \
+CUDA_VISIBLE_DEVICES=2 python eval_offline.py \
+  --model_path ../modelnew/llama3.2-1b-w8a8-qat-experiment \
+  --data_dir ../datasets/mergedata_prev2  \
+  --output_file ./resultnew/resules_llama3.2-1b-fp-qat.json \
   --batch_size 8 \
   --device cuda \
   --quant_mode none
 
-CUDA_VISIBLE_DEVICES=3 python eval_offline.py \
-  --model_path ../model_quantization/llama3.2-1b-w8a8-qat-fake \
-  --data_dir ../datasets/mergedata_preprocessed \
-  --output_file resules_llama3.2-1b-w8a8-qat-fake.json \
-  --batch_size 8 \
-  --device cuda \
-  --quant_mode none
 """
 
 import os
@@ -76,7 +58,7 @@ from datasets import load_from_disk
 from tqdm import tqdm
 
 import torchao.quantization  # 确保量化类型注册
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 
 # ========= 参数解析 =========
@@ -110,6 +92,8 @@ def parse_args():
 
     parser.add_argument("--throughput_runs", type=int, default=50,
                         help="Number of runs for throughput benchmark")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
 
     return parser.parse_args()
 
@@ -361,7 +345,11 @@ def main():
     print(f"Batch size      : {args.batch_size}")
     print(f"Max samples     : {args.max_samples}")
     print(f"Throughput runs : {args.throughput_runs}")
+    print(f"Seed            : {args.seed}")
     print("=" * 60)
+
+    # Seed everything for reproducibility across runs
+    set_seed(args.seed)
 
     # Device
     if args.device == "cuda" and not torch.cuda.is_available():

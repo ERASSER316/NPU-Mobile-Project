@@ -1,0 +1,30 @@
+{
+  "model_path": "../modelnew_quantization/llama3.2-1b-fp-finetune-100steps-w8a8-int8",
+  "quant_mode": "ptq_w8a8",
+  "data_dir": "../datasets/mergedata_prev2",
+  "model_size_mb_via_save": 1430.0148820877075,
+  "evaluation_date": "2025-12-10 08:49:07",
+  "test": {
+    "ppl": 1.646619542584141,
+    "avg_loss": 0.4987244242583406,
+    "loss_std": 0.17037364840507507,
+    "loss_min": 0.04349307715892792,
+    "loss_max": 0.9682449698448181,
+    "total_tokens": 233622,
+    "samples_evaluated": 7757
+  },
+  "throughput": {
+    "mean_latency_ms": 578.8713979721069,
+    "tokens_per_sec": 14151.675188475512,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  },
+  "throughput_compiled": {
+    "mean_latency_ms": 201.35701179504395,
+    "tokens_per_sec": 40683.95695273042,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  }
+}

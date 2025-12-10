@@ -8,10 +8,10 @@ import os
 # 1. Baseline finetune 后的模型作为 PTQ 起点
 ###############################################
 # 改成你 baseline_finetune_train_eval.py 保存出来的目录
-fp_finetune_model_path = "../../model_quantization/llama3.2-1b-fp-finetune-100steps"
+fp_finetune_model_path = "../../modelnew/llama3.2-1b-baseline-control"
 
 # 导出的 W8A8 int8 模型保存目录（不要和上面混在一起）
-save_dir = "../../model_quantization/llama3.2-1b-fp-finetune-100steps-w8a8-int8"
+save_dir = "../../modelnew_quantization/llama3.2-1b-fp-finetune-100steps-w8a8-int8"
 
 os.makedirs(save_dir, exist_ok=True)
 

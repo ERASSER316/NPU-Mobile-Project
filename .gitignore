@@ -1,6 +1,14 @@
 datasets/raw/SQuAD/
+datasets/mergedata_preprocessed/
 useless/
 model_quantization/
 datasets/mergedata_preprocessed/
-datasets/pre_datasets/
 datasets/raw/
+datasets/mergedata_prev2
+PTQ/
+evaluate/result/
+evaluate/eval_online.py
+QAT/int4/
+QAT/useless/
+modelnew/
+modelnew_quantization

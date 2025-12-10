@@ -1,0 +1,30 @@
+{
+  "model_path": "../modelnew/llama3.2-1b-baseline-control",
+  "quant_mode": "none",
+  "data_dir": "../datasets/mergedata_prev2",
+  "model_size_mb_via_save": 2357.2277879714966,
+  "evaluation_date": "2025-12-10 09:14:58",
+  "test": {
+    "ppl": 1.6422240609404737,
+    "avg_loss": 0.49605145783573074,
+    "loss_std": 0.16971246898174286,
+    "loss_min": 0.03949014097452164,
+    "loss_max": 0.9712370038032532,
+    "total_tokens": 233622,
+    "samples_evaluated": 7757
+  },
+  "throughput": {
+    "mean_latency_ms": 350.7509517669678,
+    "tokens_per_sec": 23355.60305319601,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  },
+  "throughput_compiled": {
+    "mean_latency_ms": 321.4324474334717,
+    "tokens_per_sec": 25485.914895681264,
+    "batch_size": 8,
+    "seq_len": 1024,
+    "num_runs": 50
+  }
+}
